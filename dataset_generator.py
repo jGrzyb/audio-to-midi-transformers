@@ -75,6 +75,7 @@ def createDataset(wav_midi_list: list[tuple], output_dir: str, chunk_size=128, s
         name = wave_path.split('/')[-1].split('.')[0]
         chunks_files = makeChunks(midi_path, wave_path, name, output_dir, chunk_size, step_size)
         files.extend(chunks_files)
+        print(f'{i}. {name}')
     return files
 
 

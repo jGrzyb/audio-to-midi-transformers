@@ -15,6 +15,7 @@ from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+from sklearn.model_selection import train_test_split
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -304,8 +305,7 @@ def train(
             loss.backward()
             optimizer.step()
 
-            accuracy = (output.argmax(dim=1) ==
-                        target_tokens).float().mean().item()
+            accuracy = (output.argmax(dim=1) == target_tokens).float().mean().item()
             metrics_tracker.update(loss.item(), accuracy)
 
             progress_bar.update(i + 1, f'{epoch + 1}/{epochs}')
@@ -328,7 +328,7 @@ def train(
 
 # %%
 class PianoTranscriber(nn.Module):
-    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 2, num_layers: int = 2):
+    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 8, num_layers: int = 6):
         super(PianoTranscriber, self).__init__()
 
         self.input_layer = nn.Linear(input_size, d_model)
@@ -375,6 +375,7 @@ class PianoTranscriber(nn.Module):
 df = pd.read_csv('dataset.csv')
 df['image'] = df['image'].apply(lambda x: os.path.join('dataset', x))
 df['midi'] = df['midi'].apply(lambda x: os.path.join('dataset', x))
+train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
 
 # %%
 transform = transforms.Compose([
@@ -382,23 +383,25 @@ transform = transforms.Compose([
     transforms.ToTensor(),
 ])
 tokenizer = Tokenizer()
-dataset = FrameDataset(df, tokenizer, transform=transform, max_len=600)
-loader = DataLoader(dataset, batch_size=16, num_workers=4, shuffle=True)
+
+train_dataset = FrameDataset(df, tokenizer, transform=transform, max_len=600)
+train_loader = DataLoader(train_dataset, batch_size=16, num_workers=4, shuffle=True)
+
+val_dataset = FrameDataset(val_df, tokenizer, transform=transform, max_len=600)
+val_loader = DataLoader(val_dataset, batch_size=16, num_workers=4, shuffle=False)
 
 # %% [markdown]
 # ### Training
 
 # %%
-timestamp = time.strftime("%Y%m%d-%H%M%S")
-
 model = PianoTranscriber(128, len(tokenizer.id_to_token)).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
-early_stopping = EarlyStopping(patience=5, path=f'model_{timestamp}.pt')
+early_stopping = EarlyStopping(patience=5, path=f'model_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
 # %%
-train(model, loader, loader, criterion, optimizer, epochs=100, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=100, device=device, history=history, early_stopping=early_stopping)
 
 # %%
 history.plot()

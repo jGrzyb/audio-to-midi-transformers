@@ -34,7 +34,7 @@ if __name__ == '__main__':
     root = 'maestro-v3.0.0'
     df = pd.read_csv(os.path.join(root, 'maestro-v3.0.0.csv'))
     df = df.sort_values(by=['duration'], ascending=True)
-    df = df.iloc[:10]
+    df = df.iloc[:300]
 
     if not os.path.exists('waves'):
         os.makedirs('waves')
