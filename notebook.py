@@ -76,7 +76,7 @@ class Tokenizer:
 
 # %%
 class FrameDataset(Dataset):
-    def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None, max_len = 1000):
+    def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None, max_len = 1100):
         self.df = image_midi_path_pairs
         self.tokenizer = tokenizer
         self.transform = transform if transform else transforms.ToTensor()
@@ -106,6 +106,28 @@ class FrameDataset(Dataset):
 
 # %% [markdown]
 # # Helpers
+
+# %%
+def get_max_length(df: pd.DataFrame, verbose: bool = False):
+    max_len = 0
+    for i, (idx, row) in enumerate(df.iterrows()):
+        with open(row['midi']) as f:
+            lines = f.readlines()
+            max_len = max(max_len, len(lines))
+        if verbose and i * 100 % len(df) == 0:
+            print(f"Processed {i} / {len(df)} files")
+    return max_len * 3
+
+# %%
+def get_df_with_max_len(df: pd.DataFrame, max_len: int = 1100):
+    l = []
+    for i, (idx, row) in enumerate(df.iterrows()):
+        with open(row['midi']) as f:
+            length = len(f.readlines())
+            if length < max_len / 3 - 4:
+                l.append(row)
+
+    return pd.DataFrame(l, columns=df.columns)
 
 # %%
 class ProgressBar:
@@ -176,7 +198,7 @@ class Validator:
 
 # %%
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 1000):
+    def __init__(self, d_model: int, max_len: int = 1100):
         super(PositionalEncoding, self).__init__()
         self.encoding = torch.zeros(max_len, d_model).to(device)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
@@ -328,11 +350,11 @@ def train(
 
 # %%
 class PianoTranscriber(nn.Module):
-    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 8, num_layers: int = 6):
+    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 2, num_layers: int = 2, max_len: int = 1100):
         super(PianoTranscriber, self).__init__()
 
         self.input_layer = nn.Linear(input_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
@@ -375,7 +397,17 @@ class PianoTranscriber(nn.Module):
 df = pd.read_csv('dataset.csv')
 df['image'] = df['image'].apply(lambda x: os.path.join('dataset', x))
 df['midi'] = df['midi'].apply(lambda x: os.path.join('dataset', x))
-train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
+use_df = df
+use_df = get_df_with_max_len(use_df, max_len=500)
+# use_df = df.sample(1000)
+use_df
+
+# %%
+train_df, val_df = train_test_split(use_df, test_size=0.1, random_state=42)
+
+# %%
+max_len = get_max_length(use_df) + 10
+max_len
 
 # %%
 transform = transforms.Compose([
@@ -384,24 +416,24 @@ transform = transforms.Compose([
 ])
 tokenizer = Tokenizer()
 
-train_dataset = FrameDataset(df, tokenizer, transform=transform)
+train_dataset = FrameDataset(train_df, tokenizer, transform=transform, max_len=max_len)
 train_loader = DataLoader(train_dataset, batch_size=16, num_workers=4, shuffle=True)
 
-val_dataset = FrameDataset(val_df, tokenizer, transform=transform)
+val_dataset = FrameDataset(val_df, tokenizer, transform=transform, max_len=max_len)
 val_loader = DataLoader(val_dataset, batch_size=16, num_workers=4, shuffle=False)
 
 # %% [markdown]
 # ### Training
 
 # %%
-model = PianoTranscriber(128, len(tokenizer.id_to_token)).to(device)
+model = PianoTranscriber(128, len(tokenizer.id_to_token), max_len=max_len).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
 early_stopping = EarlyStopping(patience=5, path=f'model_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
 # %%
-train(model, train_loader, val_loader, criterion, optimizer, epochs=100, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=1, device=device, history=history, early_stopping=early_stopping)
 
 # %%
 history.plot()
