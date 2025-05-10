@@ -433,7 +433,7 @@ history = TrainingHistory()
 early_stopping = EarlyStopping(patience=5, path=f'model_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
 # %%
-train(model, train_loader, val_loader, criterion, optimizer, epochs=1, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=10, device=device, history=history, early_stopping=early_stopping)
 
 # %%
 history.plot()
