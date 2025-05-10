@@ -76,7 +76,7 @@ class Tokenizer:
 
 # %%
 class FrameDataset(Dataset):
-    def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None, max_len = 600):
+    def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None, max_len = 1000):
         self.df = image_midi_path_pairs
         self.tokenizer = tokenizer
         self.transform = transform if transform else transforms.ToTensor()
@@ -176,7 +176,7 @@ class Validator:
 
 # %%
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 600):
+    def __init__(self, d_model: int, max_len: int = 1000):
         super(PositionalEncoding, self).__init__()
         self.encoding = torch.zeros(max_len, d_model).to(device)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
@@ -384,10 +384,10 @@ transform = transforms.Compose([
 ])
 tokenizer = Tokenizer()
 
-train_dataset = FrameDataset(df, tokenizer, transform=transform, max_len=600)
+train_dataset = FrameDataset(df, tokenizer, transform=transform)
 train_loader = DataLoader(train_dataset, batch_size=16, num_workers=4, shuffle=True)
 
-val_dataset = FrameDataset(val_df, tokenizer, transform=transform, max_len=600)
+val_dataset = FrameDataset(val_df, tokenizer, transform=transform)
 val_loader = DataLoader(val_dataset, batch_size=16, num_workers=4, shuffle=False)
 
 # %% [markdown]
