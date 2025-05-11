@@ -20,7 +20,7 @@ def getSpectogram(wave_path, sample_rate=12_800, n_fft=2048, hop_length=256, n_m
 def getMessageDf(file_path):
     mid = mido.MidiFile(file_path)
     # note_msg = filter(lambda y: y.type == 'note_on', mid.tracks[1])
-    note_msg = map(lambda x: (x, x.time), mid.tracks[1])
+    note_msg = map(lambda x: (x, x.time), mid.tracks[-1])
     note_df = pd.DataFrame(note_msg, columns=['other', 'time'])
 
     note_df['time'] = note_df['time'].cumsum()
@@ -31,7 +31,7 @@ def getMessageDf(file_path):
     return note_df
 
 
-def makeChunks(midi_path, wave_path, name, output_dir, chunk_size=128, step_size=64, clear=False):
+def makeChunks(midi_path, wave_path, name, output_dir, hop_length=256, chunk_size=128, step_size=64, clear=False):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     if clear:
@@ -40,7 +40,7 @@ def makeChunks(midi_path, wave_path, name, output_dir, chunk_size=128, step_size
 
     image, sr = getSpectogram(wave_path)
     midi = getMessageDf(midi_path)
-    time_per_frame = 256 / sr
+    time_per_frame = hop_length / sr
 
     image = (image - image.min()) / (image.max() - image.min()) * 255
     length = int((image.shape[1] - chunk_size) / step_size)
@@ -59,7 +59,7 @@ def makeChunks(midi_path, wave_path, name, output_dir, chunk_size=128, step_size
         midi_tmp = midi_tmp.copy()
         midi_tmp['time'] = midi_tmp['time'] - int(start_time)
         
-        if len(midi_tmp) > 0 and len(midi_tmp) < 110 and midi_tmp['note'].min() >= 27 and midi_tmp['note'].max() <= 99:
+        if len(midi_tmp) > 0 and len(midi_tmp):
             cv2.imwrite(os.path.join(output_dir, im_out_path), tmp)
             midi_tmp.to_csv(os.path.join(output_dir, csv_out_path), index=False)
             files.append((im_out_path, csv_out_path))
@@ -81,10 +81,19 @@ def createDataset(wav_midi_list: list[tuple], output_dir: str, chunk_size=128, s
 
 
 if __name__ == '__main__':
+    csv_path = 'wav_midi.csv'
+    folder_path = 'dataset'
     output = 'waves'
-    wav_midi = pd.read_csv('wav_midi.csv').apply(lambda x: (os.path.join(output, x['wav']), os.path.join(output, x['midi'])), axis=1).tolist()
+    output_csv = 'dataset.csv'
+
+    # csv_path = 'wav_midi1.csv'
+    # folder_path = 'dataset1'
+    # output = 'waves1'
+    # output_csv = 'dataset1.csv'
+
+    wav_midi = pd.read_csv(csv_path).apply(lambda x: (os.path.join(output, x['wav']), os.path.join(output, x['midi'])), axis=1).tolist()
     wav_midi[:3]
 
-    files = createDataset(wav_midi, 'dataset')
+    files = createDataset(wav_midi, folder_path)
     files = pd.DataFrame(files, columns=['image', 'midi'])
-    files.to_csv('dataset.csv', index=False, header=['image', 'midi'])
+    files.to_csv(output_csv, index=False, header=['image', 'midi'])

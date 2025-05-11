@@ -31,24 +31,37 @@ def getMessageDf(file_path):
 
 
 if __name__ == '__main__':
-    root = 'maestro-v3.0.0'
-    df = pd.read_csv(os.path.join(root, 'maestro-v3.0.0.csv'))
+    csv_path = os.path.join('maestro-v3.0.0', 'maestro-v3.0.0.csv')
+    folder_path = 'maestro-v3.0.0'
+    output_dir = 'waves'
+    output_csv = 'wav_midi.csv'
+
+    df = pd.read_csv(csv_path)
+    df['midi_filename'] = df['midi_filename'].apply(lambda x: os.path.join(folder_path, x))
     df = df.sort_values(by=['duration'], ascending=True)
     df = df.iloc[:300]
 
-    if not os.path.exists('waves'):
-        os.makedirs('waves')
+    # csv_path = 'midi_files.csv'
+    # folder_path = 'my_midi'
+    # output_dir = 'waves1'
+    # output_csv = 'wav_midi1.csv'
+    # df = pd.read_csv(csv_path)
+
+    
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     file_rows = []
 
     for i, (idx, row) in enumerate(df.iterrows()):
         wav_name = f'{idx}.wav'
-        midi_name = f'{idx}.midi'
-        generateWave(os.path.join(root, row['midi_filename']), wav_name, 'waves')
-        with open(os.path.join(root, row['midi_filename']), 'rb') as f1, open(os.path.join('waves', midi_name), 'wb') as f2:
+        midi_name = f'{idx}.mid'
+        generateWave(row['midi_filename'], wav_name, output_dir)
+        with open(row['midi_filename'], 'rb') as f1, open(os.path.join(output_dir, midi_name), 'wb') as f2:
             f2.write(f1.read())
         file_rows.append((wav_name, midi_name))
         print(f'{str(i).rjust(3)}. {str(idx).rjust(5)}    {row["midi_filename"]}')
     
     file_df = pd.DataFrame(file_rows, columns=['wav', 'midi'])
-    file_df.to_csv('wav_midi.csv', index=False)
+    file_df.to_csv(output_csv, index=False)

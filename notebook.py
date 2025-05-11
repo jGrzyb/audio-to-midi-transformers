@@ -434,6 +434,7 @@ train_df, val_df = train_test_split(use_df, test_size=0.1, random_state=42)
 transform = transforms.Compose([
     transforms.Resize((256, 128)),
     transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5]),
 ])
 tokenizer = Tokenizer()
 
