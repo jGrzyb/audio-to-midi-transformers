@@ -52,16 +52,17 @@ def makeChunks(midi_path, wave_path, name, output_dir, chunk_size=128, step_size
         csv_out_path = f'{name}_{i}.csv'
 
         tmp = image[:, i * step_size:i *step_size + chunk_size].astype(np.uint8)
-        cv2.imwrite(os.path.join(output_dir, im_out_path), tmp)
 
         start_time = i * step_size * time_per_frame * 1000
         end_time = (i * step_size + chunk_size) * time_per_frame * 1000
         midi_tmp = midi[(midi['time'] >= start_time)& (midi['time'] <= end_time)]
         midi_tmp = midi_tmp.copy()
         midi_tmp['time'] = midi_tmp['time'] - int(start_time)
-        midi_tmp.to_csv(os.path.join(output_dir, csv_out_path), index=False)
-
-        files.append((im_out_path, csv_out_path))
+        
+        if len(midi_tmp) > 0 and len(midi_tmp) < 110 and midi_tmp['note'].min() >= 27 and midi_tmp['note'].max() <= 99:
+            cv2.imwrite(os.path.join(output_dir, im_out_path), tmp)
+            midi_tmp.to_csv(os.path.join(output_dir, csv_out_path), index=False)
+            files.append((im_out_path, csv_out_path))
     return files
 
 

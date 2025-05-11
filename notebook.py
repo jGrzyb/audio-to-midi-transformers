@@ -25,7 +25,7 @@ print(f"Using device: {device}")
 
 # %%
 class Tokenizer:
-    def __init__(self, time_count: int = 260, note_count: int = 110, vel_count: int = 2):
+    def __init__(self, time_count: int = 26, note_count: int = 110, vel_count: int = 2):
         self.val_to_velo_id: dict = {i: i + 1 for i in range(vel_count)}
         self.val_to_note_id: dict = {i: i + 1 + vel_count for i in range(note_count)}
         self.val_to_time_id: dict = {i: i + 1 + vel_count + note_count for i in range(time_count)}
@@ -93,7 +93,7 @@ class FrameDataset(Dataset):
         image = self.transform(image)
 
         midi = pd.read_csv(midi_path)
-        midi['time'] = midi['time'] // 10
+        midi['time'] = midi['time'] // 100
         midi['velocity'] = (midi['velocity'] > 0).astype(int)
         midi = midi.values.tolist()
         midi = self.tokenizer.tuple_list_to_ids(midi)
@@ -354,36 +354,54 @@ class PianoTranscriber(nn.Module):
         super(PianoTranscriber, self).__init__()
 
         self.input_layer = nn.Linear(input_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, max_len)
+        self.input_norm = nn.LayerNorm(d_model)
+        self.input_dropout = nn.Dropout(p=0.2)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead)
+        self.pos_encoder = PositionalEncoding(d_model, max_len)
+        self.pos_norm = nn.LayerNorm(d_model)
+        self.pos_dropout = nn.Dropout(p=0.2)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dropout=0.2, norm_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
 
-        decoder_layer = nn.TransformerDecoderLayer(d_model, nhead)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model, nhead, dropout=0.2, norm_first=True)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers)
 
         self.embedding = nn.Embedding(vocab_size, d_model)
+        self.output_norm = nn.LayerNorm(d_model)
+        self.output_dropout = nn.Dropout(p=0.2)
         self.output = nn.Linear(d_model, vocab_size)
 
     def forward(self, src: torch.Tensor, tgt: torch.Tensor):
         src = src.flatten(1, 2)
         src = src.permute(0, 2, 1)
         src = self.input_layer(src)
+        src = self.input_norm(src)
+        src = self.input_dropout(src)
         src = self.pos_encoder(src)
+        src = self.pos_norm(src)
+        src = self.pos_dropout(src)
         src = src.permute(1, 0, 2)
         memory = self.encoder(src)
 
         tgt = self.embedding(tgt)
         tgt = self.pos_encoder(tgt)
+        tgt = self.pos_norm(tgt)
+        tgt = self.pos_dropout(tgt)
         tgt = tgt.permute(1, 0, 2)
 
-        tgt_mask = self.generate_square_subsequent_mask(tgt.size(0)).to(tgt.device)
+        tgt_mask = self.generate_square_subsequent_mask(
+            tgt.size(0)).to(tgt.device)
 
         output = self.decoder(tgt, memory, tgt_mask=tgt_mask)
+        output = self.output_norm(output)
+        output = self.output_dropout(output)
         output = self.output(output)
         output = output.permute(1, 0, 2)
         return output
-
+    
     def generate_square_subsequent_mask(self, sz):
         return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
 
@@ -397,6 +415,13 @@ class PianoTranscriber(nn.Module):
 df = pd.read_csv('dataset.csv')
 df['image'] = df['image'].apply(lambda x: os.path.join('dataset', x))
 df['midi'] = df['midi'].apply(lambda x: os.path.join('dataset', x))
+
+
+# %%
+max_len = get_max_length(df) + 10
+max_len
+
+# %%
 use_df = df
 use_df = get_df_with_max_len(use_df, max_len=500)
 # use_df = df.sample(1000)
@@ -406,34 +431,30 @@ use_df
 train_df, val_df = train_test_split(use_df, test_size=0.1, random_state=42)
 
 # %%
-max_len = get_max_length(use_df) + 10
-max_len
-
-# %%
 transform = transforms.Compose([
-    transforms.Resize((128, 64)),
+    transforms.Resize((256, 128)),
     transforms.ToTensor(),
 ])
 tokenizer = Tokenizer()
 
 train_dataset = FrameDataset(train_df, tokenizer, transform=transform, max_len=max_len)
-train_loader = DataLoader(train_dataset, batch_size=16, num_workers=4, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=32, num_workers=2, shuffle=True)
 
 val_dataset = FrameDataset(val_df, tokenizer, transform=transform, max_len=max_len)
-val_loader = DataLoader(val_dataset, batch_size=16, num_workers=4, shuffle=False)
+val_loader = DataLoader(val_dataset, batch_size=32, num_workers=2, shuffle=False)
 
 # %% [markdown]
 # ### Training
 
 # %%
-model = PianoTranscriber(128, len(tokenizer.id_to_token), max_len=max_len).to(device)
+model = PianoTranscriber(256, len(tokenizer.id_to_token), max_len=max_len).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
 early_stopping = EarlyStopping(patience=5, path=f'model_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
 # %%
-train(model, train_loader, val_loader, criterion, optimizer, epochs=10, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=1, device=device, history=history, early_stopping=early_stopping)
 
 # %%
 history.plot()
