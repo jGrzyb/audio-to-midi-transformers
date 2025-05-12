@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import time
 from sklearn.model_selection import train_test_split
 import h5py
+import random
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -76,51 +77,67 @@ class Tokenizer:
 # # Dataset
 
 # %%
-class FrameDataset(Dataset):
-    def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None, max_len = 1100):
-        self.df = image_midi_path_pairs
-        self.tokenizer = tokenizer
-        self.transform = transform if transform else transforms.ToTensor()
-        self.max_len = max_len
+# class FrameDataset(Dataset):
+#     def __init__(self, image_midi_path_pairs: list[tuple], tokenizer: Tokenizer, max_leng: int, transform: transforms.Compose = None):
+#         self.df = image_midi_path_pairs
+#         self.tokenizer = tokenizer
+#         self.transform = transform if transform else transforms.ToTensor()
+#         self.max_leng = max_leng
 
-    def __len__(self):
-        return len(self.df)
+#     def __len__(self):
+#         return len(self.df)
 
-    def __getitem__(self, idx):
-        image_path = self.df.iloc[idx]['image']
-        midi_path = self.df.iloc[idx]['midi']
+#     def __getitem__(self, idx):
+#         image_path = self.df.iloc[idx]['image']
+#         midi_path = self.df.iloc[idx]['midi']
 
-        image = Image.open(image_path).convert('L')
-        image = self.transform(image)
+#         image = Image.open(image_path).convert('L')
+#         image = self.transform(image)
 
-        midi = pd.read_csv(midi_path)
-        midi['time'] = midi['time'] // 100
-        midi['velocity'] = (midi['velocity'] > 0).astype(int)
-        midi = midi.values.tolist()
-        midi = self.tokenizer.tuple_list_to_ids(midi)
-        midi.insert(0, self.tokenizer.token_to_id['<bos>'])
-        midi.append(self.tokenizer.token_to_id['<eos>'])
-        midi.extend([self.tokenizer.token_to_id['<pad>']] * (self.max_len - len(midi)))
-        midi = torch.tensor(midi, dtype=torch.long)
+#         midi = pd.read_csv(midi_path)
+#         midi['time'] = midi['time'] // 100
+#         midi['velocity'] = (midi['velocity'] > 0).astype(int)
+#         midi = midi.values.tolist()
+#         midi = self.tokenizer.tuple_list_to_ids(midi)
+#         midi.insert(0, self.tokenizer.token_to_id['<bos>'])
+#         midi.append(self.tokenizer.token_to_id['<eos>'])
+#         midi.extend([self.tokenizer.token_to_id['<pad>']] * (self.max_leng - len(midi)))
+#         midi = torch.tensor(midi, dtype=torch.long)
 
-        return image, midi
+#         return image, midi
 
 # %%
-class H5Dataset(Dataset):
-    def __init__(self, h5_path: str, tokenizer: Tokenizer, max_len = 1100, min_note: int = 0, max_note: int = 110):
-        self.h5_path = h5_path
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.data = []
+class Collate:
+    def __init__(self, pad_id: int):
+        self.pad_id = pad_id
 
+    def __call__(self, batch):
+        images, midis = zip(*batch)
+        images = torch.stack(images)
+        midis = pad_sequence(midis, batch_first=True, padding_value=self.pad_id)
+        return images, midis
+
+
+class DatasetPathLoader:
+    def __init__(self, h5_path: str, max_len, min_note: int = 0, max_note: int = 110):
+        self.h5_path = h5_path
+        self.data = []
         with h5py.File(h5_path, 'r') as h5:
             for piece_name in h5.keys():
                 piece_group = h5[piece_name]
                 for chunk_name in piece_group.keys():
                     chunk_group = piece_group[chunk_name]
                     meta = chunk_group['meta']
-                    if meta[0] >= min_note and meta[1] <= max_note and meta[2] <= max_len / 3 - 3:
+                    if meta[0] >= min_note and meta[1] <= max_note and meta[2] <= max_len / 3 - 1 and meta[2] > 0:
                         self.data.append((piece_name, chunk_name))
+
+
+class H5Dataset(Dataset):
+    def __init__(self, h5_path: str, data_paths: list[tuple], tokenizer: Tokenizer, transform: transforms.Compose = None):
+        self.h5_path = h5_path
+        self.tokenizer = tokenizer
+        self.data = data_paths
+        self.transform = transform if transform else transforms.ToTensor()
 
     def __len__(self):
         return len(self.data)
@@ -132,6 +149,8 @@ class H5Dataset(Dataset):
             chunk_group = piece_group[chunk_name]
 
             image = chunk_group['image'][:]
+            image = self.transform(image)
+            
             midi = chunk_group['midi'][:]
             midi[:, 0] = midi[:, 0] // 100
             midi[:, 2] = (midi[:, 2] > 0).astype(np.uint8)
@@ -139,34 +158,14 @@ class H5Dataset(Dataset):
             midi = self.tokenizer.tuple_list_to_ids(midi)
             midi.insert(0, self.tokenizer.token_to_id['<bos>'])
             midi.append(self.tokenizer.token_to_id['<eos>'])
-            midi.extend([self.tokenizer.token_to_id['<pad>']] * (self.max_len - len(midi)))
 
-        return torch.tensor(image), torch.tensor(midi)
+        return image, torch.tensor(midi)
 
 # %% [markdown]
 # # Helpers
 
-# %%
-def get_max_length(df: pd.DataFrame, verbose: bool = False):
-    max_len = 0
-    for i, (idx, row) in enumerate(df.iterrows()):
-        with open(row['midi']) as f:
-            lines = f.readlines()
-            max_len = max(max_len, len(lines))
-        if verbose and i * 100 % len(df) == 0:
-            print(f"Processed {i} / {len(df)} files")
-    return max_len * 3
-
-# %%
-def get_df_with_max_len(df: pd.DataFrame, max_len: int = 1100):
-    l = []
-    for i, (idx, row) in enumerate(df.iterrows()):
-        with open(row['midi']) as f:
-            length = len(f.readlines())
-            if length < max_len / 3 - 4:
-                l.append(row)
-
-    return pd.DataFrame(l, columns=df.columns)
+# %% [markdown]
+# ### progress bar
 
 # %%
 class ProgressBar:
@@ -185,6 +184,9 @@ class ProgressBar:
                 f'\rEpoch: {epochs.rjust(7)} {str(int(progress)).rjust(3)}% | Elapsed: {str(int(elapsed_time)).rjust(3)}s', end='')
             self.last_progress = int(progress)
 
+# %% [markdown]
+# ### metrics tracker
+
 # %%
 class MetricsTracker:
     def __init__(self):
@@ -200,6 +202,9 @@ class MetricsTracker:
 
     def get_average_accuracy(self):
         return sum(self.accuracies) / len(self.accuracies) if self.accuracies else 0.0
+
+# %% [markdown]
+# ### validator
 
 # %%
 class Validator:
@@ -235,12 +240,48 @@ class Validator:
 
         return avg_loss, avg_accuracy
 
+# %% [markdown]
+# ### validator with outputs
+
+# %%
+class ValidatorWithOutputs:
+    def __init__(self, model: nn.Module, criterion: nn.CrossEntropyLoss, device: torch.device):
+        self.model = model
+        self.criterion = criterion
+        self.device = device
+
+    def validate(self, val_loader: DataLoader) -> tuple:
+        self.model.eval()
+        outputs = []
+
+        with torch.no_grad():
+            for image, midi in val_loader:
+                image: torch.Tensor = image.to(self.device)
+                midi: torch.Tensor = midi.to(self.device)
+
+                input_tokens: torch.Tensor = midi[:, :-1]
+                target_tokens: torch.Tensor = midi[:, 1:]
+                target_tokens = target_tokens.reshape(-1)
+
+                output: torch.Tensor = self.model(image, input_tokens)
+                output = output.reshape(-1, output.shape[-1])
+
+                predicted = output.argmax(dim=1).cpu().tolist()
+                expected = target_tokens.cpu().tolist()
+
+                outputs.append((predicted, expected))
+
+        return outputs
+
+# %% [markdown]
+# ### positional encoding
+
 # %%
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 1100):
+    def __init__(self, d_model: int):
         super(PositionalEncoding, self).__init__()
-        self.encoding = torch.zeros(max_len, d_model).to(device)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        self.encoding = torch.zeros(1500, d_model).to(device)
+        position = torch.arange(0, 1500, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
         self.encoding[:, 0::2] = torch.sin(position * div_term)
         self.encoding[:, 1::2] = torch.cos(position * div_term)
@@ -249,6 +290,9 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor):
         x = x + self.encoding[:, :x.size(1), :]
         return x
+
+# %% [markdown]
+# ### history
 
 # %%
 class TrainingHistory:
@@ -293,6 +337,9 @@ class TrainingHistory:
 
         plt.tight_layout()
         plt.show()
+
+# %% [markdown]
+# ### early topping
 
 # %%
 class EarlyStopping:
@@ -389,14 +436,14 @@ def train(
 
 # %%
 class PianoTranscriber(nn.Module):
-    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 2, num_layers: int = 2, max_len: int = 1100):
+    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 2, num_layers: int = 2):
         super(PianoTranscriber, self).__init__()
 
         self.input_layer = nn.Linear(input_size, d_model)
         self.input_norm = nn.LayerNorm(d_model)
         self.input_dropout = nn.Dropout(p=0.2)
 
-        self.pos_encoder = PositionalEncoding(d_model, max_len)
+        self.pos_encoder = PositionalEncoding(d_model)
         self.pos_norm = nn.LayerNorm(d_model)
         self.pos_dropout = nn.Dropout(p=0.2)
 
@@ -451,71 +498,70 @@ class PianoTranscriber(nn.Module):
 # ### Prep
 
 # %%
-csv_path = 'dataset.csv'
-folder_path = 'dataset'
+h5_path = 'dataset.h5'
 model_name = 'model'
-
-df = pd.read_csv(csv_path)
-df['image'] = df['image'].apply(lambda x: os.path.join(folder_path, x))
-df['midi'] = df['midi'].apply(lambda x: os.path.join(folder_path, x))
-
-
-# %%
-max_len = get_max_length(df) + 10
-max_len
-
-# %%
-use_df = df
-use_df = get_df_with_max_len(use_df, max_len=500)
-# use_df = df.sample(1000)
-use_df
-
-# %%
-train_df, val_df = train_test_split(use_df, test_size=0.1, random_state=42)
+MAX_LEN = 100
+tokenizer = Tokenizer()
 
 # %%
 transform = transforms.Compose([
-    transforms.Resize((256, 128)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5], std=[0.5]),
+    transforms.Resize((512, 128)),
+    transforms.Normalize((0.5,), (0.5,))
 ])
-tokenizer = Tokenizer()
-
-train_dataset = FrameDataset(train_df, tokenizer, transform=transform, max_len=max_len)
-train_loader = DataLoader(train_dataset, batch_size=32, num_workers=4, shuffle=True)
-
-val_dataset = FrameDataset(val_df, tokenizer, transform=transform, max_len=max_len)
-val_loader = DataLoader(val_dataset, batch_size=32, num_workers=4, shuffle=False)
-
-dataset = FrameDataset(df, tokenizer, transform=transform, max_len=max_len)
-loader = DataLoader(dataset, batch_size=32, num_workers=4, shuffle=False)
-
-# %% [markdown]
-# ### Training
 
 # %%
-model = PianoTranscriber(256, len(tokenizer.id_to_token), max_len=max_len).to(device)
+path_loader = DatasetPathLoader(h5_path, MAX_LEN)
+data = random.sample(path_loader.data, 1000)
+train_data, val_data = train_test_split(data, test_size=0.1)
+val_data, test_data = train_test_split(val_data, test_size=0.1)
+
+# %%
+train_dataset = H5Dataset(h5_path, train_data, tokenizer, transform)
+val_dataset = H5Dataset(h5_path, val_data, tokenizer, transform)
+collate = Collate(tokenizer.token_to_id['<pad>'])
+train_loader = DataLoader(train_dataset, batch_size=32, num_workers=4, shuffle=True, collate_fn=collate)
+val_loader = DataLoader(val_dataset, batch_size=32, num_workers=4, shuffle=False, collate_fn=collate)
+
+# %%
+model = PianoTranscriber(512, len(tokenizer.id_to_token)).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
 early_stopping = EarlyStopping(patience=5, path=f'{model_name}_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
+# %% [markdown]
+# ### Training
+
 # %%
-train(model, loader, val_loader, criterion, optimizer, epochs=1, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=30, device=device, history=history, early_stopping=early_stopping)
+
+# %% [markdown]
+# # Tests
+
+# %%
+def get_param_acc(outputs):
+    res = np.zeros((len(outputs), 3))
+    for i, el in enumerate(outputs):
+        el = np.array(el)
+        el = el[:, :-1]
+        el = el.reshape(2, -1, 3)
+        res[i] = (el[0] == el[1]).sum(axis=0) / len(el[0])
+    return res.sum(axis=0) / len(outputs)
+
+# %%
+test_dataset = H5Dataset(h5_path, test_data, tokenizer, transform)
+test_loader = DataLoader(test_dataset, batch_size=1, num_workers=4, shuffle=False, collate_fn=collate)
+
+criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+val_with_outs = ValidatorWithOutputs(model, criterion, device)
+outputs = val_with_outs.validate(test_loader)
+
+print(get_param_acc(outputs))
 
 # %%
 history.plot()
-
-# %%
-h5dataset = H5Dataset('dataset_transformed.h5', tokenizer, max_len=max_len)
-h5_loader = DataLoader(h5dataset, batch_size=32, num_workers=4, shuffle=False)
-
-# %%
-for i, (image, midi) in enumerate(h5_loader):
-    print(image.shape, midi.shape)
-    break
-
-# %%
-train(model, h5_loader, val_loader, criterion, optimizer, epochs=1, device=device, history=history, early_stopping=early_stopping)
 
 
