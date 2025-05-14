@@ -278,17 +278,18 @@ class ValidatorWithOutputs:
 
 # %%
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, max_len: int):
         super(PositionalEncoding, self).__init__()
-        self.encoding = torch.zeros(1500, d_model).to(device)
-        position = torch.arange(0, 1500, dtype=torch.float).unsqueeze(1)
+        pe = torch.zeros(max_len, d_model).to(device)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
-        self.encoding[:, 0::2] = torch.sin(position * div_term)
-        self.encoding[:, 1::2] = torch.cos(position * div_term)
-        self.encoding = self.encoding.unsqueeze(0)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
     
     def forward(self, x: torch.Tensor):
-        x = x + self.encoding[:, :x.size(1), :]
+        x = x + self.pe[:, :x.size(1)]
         return x
 
 # %% [markdown]
@@ -436,54 +437,48 @@ def train(
 
 # %%
 class PianoTranscriber(nn.Module):
-    def __init__(self, input_size: int, vocab_size: int, d_model: int = 128, nhead: int = 2, num_layers: int = 2):
+    def __init__(
+        self, 
+        input_size: int, 
+        vocab_size: int, 
+        d_model_en: int = 32, 
+        nhead_en: int = 1, 
+        num_layers_en: int = 1, 
+        d_model_de: int = 32,
+        nhead_de: int = 1, 
+        num_layers_de: int = 1
+    ):
         super(PianoTranscriber, self).__init__()
 
-        self.input_layer = nn.Linear(input_size, d_model)
-        self.input_norm = nn.LayerNorm(d_model)
-        self.input_dropout = nn.Dropout(p=0.2)
+        self.pos_encoder = PositionalEncoding(d_model_en, 200)
 
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.pos_norm = nn.LayerNorm(d_model)
-        self.pos_dropout = nn.Dropout(p=0.2)
+        encoder_layer = nn.TransformerEncoderLayer(d_model_en, nhead_en, dropout=0.2, norm_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers_en)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dropout=0.2, norm_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        decoder_layer = nn.TransformerDecoderLayer(d_model_de, nhead_de, dropout=0.2, norm_first=True)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers_de)
 
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model, nhead, dropout=0.2, norm_first=True)
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers)
+        self.embedding = nn.Embedding(vocab_size, d_model_de)
+        self.pos_decoder = PositionalEncoding(d_model_de, 1500)
 
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.output_norm = nn.LayerNorm(d_model)
-        self.output_dropout = nn.Dropout(p=0.2)
-        self.output = nn.Linear(d_model, vocab_size)
+        self.output = nn.Linear(d_model_de, vocab_size)
 
     def forward(self, src: torch.Tensor, tgt: torch.Tensor):
         src = src.flatten(1, 2)
         src = src.permute(0, 2, 1)
-        src = self.input_layer(src)
-        src = self.input_norm(src)
-        src = self.input_dropout(src)
+
         src = self.pos_encoder(src)
-        src = self.pos_norm(src)
-        src = self.pos_dropout(src)
         src = src.permute(1, 0, 2)
         memory = self.encoder(src)
 
         tgt = self.embedding(tgt)
-        tgt = self.pos_encoder(tgt)
-        tgt = self.pos_norm(tgt)
-        tgt = self.pos_dropout(tgt)
+        tgt = self.pos_decoder(tgt)
         tgt = tgt.permute(1, 0, 2)
 
         tgt_mask = self.generate_square_subsequent_mask(
             tgt.size(0)).to(tgt.device)
 
-        output = self.decoder(tgt, memory, tgt_mask=tgt_mask)
-        output = self.output_norm(output)
-        output = self.output_dropout(output)
+        output: torch.Tensor = self.decoder(tgt, memory, tgt_mask=tgt_mask)
         output = self.output(output)
         output = output.permute(1, 0, 2)
         return output
@@ -506,13 +501,15 @@ tokenizer = Tokenizer()
 # %%
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Resize((512, 128)),
+    transforms.Resize((128, 64)),
     transforms.Normalize((0.5,), (0.5,))
 ])
 
 # %%
 path_loader = DatasetPathLoader(h5_path, MAX_LEN)
+data = path_loader.data
 data = random.sample(path_loader.data, 1000)
+print(f"Total data: {len(data)}")
 train_data, val_data = train_test_split(data, test_size=0.1)
 val_data, test_data = train_test_split(val_data, test_size=0.1)
 
@@ -523,18 +520,31 @@ collate = Collate(tokenizer.token_to_id['<pad>'])
 train_loader = DataLoader(train_dataset, batch_size=32, num_workers=4, shuffle=True, collate_fn=collate)
 val_loader = DataLoader(val_dataset, batch_size=32, num_workers=4, shuffle=False, collate_fn=collate)
 
+# %% [markdown]
+# ### Training
+
 # %%
-model = PianoTranscriber(512, len(tokenizer.id_to_token)).to(device)
+model = PianoTranscriber(
+    input_size = 256, 
+    vocab_size = len(tokenizer.id_to_token),
+    d_model_en = 128, 
+    nhead_en = 1, 
+    num_layers_en = 1, 
+    d_model_de = 128, 
+    nhead_de = 1, 
+    num_layers_de = 1
+).to(device)
+
+# weights = torch.ones(len(tokenizer.id_to_token)).to(device)
+# for note_id in tokenizer.val_to_note_id.values():
+#     weights[note_id] = 2
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
 early_stopping = EarlyStopping(patience=5, path=f'{model_name}_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
-# %% [markdown]
-# ### Training
-
 # %%
-train(model, train_loader, val_loader, criterion, optimizer, epochs=30, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=10, device=device, history=history, early_stopping=early_stopping)
 
 # %% [markdown]
 # # Tests
@@ -560,8 +570,27 @@ val_with_outs = ValidatorWithOutputs(model, criterion, device)
 outputs = val_with_outs.validate(test_loader)
 
 print(get_param_acc(outputs))
+for i, (predicted, expected) in enumerate(outputs):
+    if i > 4:
+        break
+    print(f"Predicted: {predicted}")
+    print(f"Expected: {expected}")
+    print()
 
 # %%
 history.plot()
+
+# %%
+for i, (image, midi) in enumerate(train_loader):
+    if i > 0:
+        break
+    last = (midi[0] == tokenizer.token_to_id['<eos>']).nonzero(as_tuple=True)[0].item()
+    notes = tokenizer.id_list_to_tuple_list(midi[0][1:last].cpu().tolist())
+    notes = np.array(notes)
+    print(notes[:, 1])
+    plt.figure(figsize=(8, 8))
+    plt.imshow(image[0].cpu().squeeze(), cmap='gray', aspect=1/4, interpolation='nearest')
+    plt.axis('off')
+    plt.show()
 
 
