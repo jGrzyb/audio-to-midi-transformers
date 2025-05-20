@@ -34,12 +34,12 @@ if __name__ == '__main__':
     csv_path = os.path.join('maestro-v3.0.0', 'maestro-v3.0.0.csv')
     folder_path = 'maestro-v3.0.0'
     output_dir = 'waves'
-    output_csv = 'wav_midi.csv'
+    output_csv = 'wav_midip2.csv'
 
     df = pd.read_csv(csv_path)
     df['midi_filename'] = df['midi_filename'].apply(lambda x: os.path.join(folder_path, x))
     df = df.sort_values(by=['duration'], ascending=True)
-    df = df.iloc[:300]
+    df = df.iloc[300:720]
 
     # csv_path = 'midi_files.csv'
     # folder_path = 'my_midi'

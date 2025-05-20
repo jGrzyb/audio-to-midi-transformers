@@ -27,7 +27,7 @@ print(f"Using device: {device}")
 
 # %%
 class Tokenizer:
-    def __init__(self, time_count: int = 26, note_count: int = 110, vel_count: int = 2):
+    def __init__(self, time_count: int = 260, note_count: int = 110, vel_count: int = 2):
         self.val_to_velo_id: dict = {i: i + 1 for i in range(vel_count)}
         self.val_to_note_id: dict = {i: i + 1 + vel_count for i in range(note_count)}
         self.val_to_time_id: dict = {i: i + 1 + vel_count + note_count for i in range(time_count)}
@@ -152,7 +152,7 @@ class H5Dataset(Dataset):
             image = self.transform(image)
             
             midi = chunk_group['midi'][:]
-            midi[:, 0] = midi[:, 0] // 100
+            midi[:, 0] = midi[:, 0] // 10
             midi[:, 2] = (midi[:, 2] > 0).astype(np.uint8)
             midi = midi.tolist()
             midi = self.tokenizer.tuple_list_to_ids(midi)
@@ -438,40 +438,61 @@ def train(
 # %%
 class PianoTranscriber(nn.Module):
     def __init__(
-        self, 
-        input_size: int, 
-        vocab_size: int, 
-        d_model_en: int = 32, 
-        nhead_en: int = 1, 
-        num_layers_en: int = 1, 
-        d_model_de: int = 32,
-        nhead_de: int = 1, 
-        num_layers_de: int = 1
+        self,
+        input_size: int,
+        vocab_size: int,
+        d_model: int = 128,
+        nhead_en: int = 1,
+        num_layers_en: int = 1,
+        nhead_de: int = 1,
+        num_layers_de: int = 1,
+        dropout: float = 0.2  # Added dropout parameter
     ):
         super(PianoTranscriber, self).__init__()
 
-        self.pos_encoder = PositionalEncoding(d_model_en, 200)
+        self.input_size = nn.Linear(input_size, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, 200)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model_en, nhead_en, dropout=0.2, norm_first=True)
+        # Add LayerNorm and Dropout after input_size
+        self.input_norm = nn.LayerNorm(d_model)
+        self.input_dropout = nn.Dropout(dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead_en, dropout=dropout, norm_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers_en)
 
-        decoder_layer = nn.TransformerDecoderLayer(d_model_de, nhead_de, dropout=0.2, norm_first=True)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model, nhead_de, dropout=dropout, norm_first=True)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers_de)
 
-        self.embedding = nn.Embedding(vocab_size, d_model_de)
-        self.pos_decoder = PositionalEncoding(d_model_de, 1500)
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.pos_decoder = PositionalEncoding(d_model, 1500)
 
-        self.output = nn.Linear(d_model_de, vocab_size)
+        # Add LayerNorm and Dropout after embedding
+        self.embedding_norm = nn.LayerNorm(d_model)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        self.output = nn.Linear(d_model, vocab_size)
 
     def forward(self, src: torch.Tensor, tgt: torch.Tensor):
         src = src.flatten(1, 2)
         src = src.permute(0, 2, 1)
+        src = self.input_size(src)
+
+        # Apply LayerNorm and Dropout after input_size
+        src = self.input_norm(src)
+        src = self.input_dropout(src)
 
         src = self.pos_encoder(src)
         src = src.permute(1, 0, 2)
         memory = self.encoder(src)
 
         tgt = self.embedding(tgt)
+
+        # Apply LayerNorm and Dropout after embedding
+        tgt = self.embedding_norm(tgt)
+        tgt = self.embedding_dropout(tgt)
+
         tgt = self.pos_decoder(tgt)
         tgt = tgt.permute(1, 0, 2)
 
@@ -482,7 +503,7 @@ class PianoTranscriber(nn.Module):
         output = self.output(output)
         output = output.permute(1, 0, 2)
         return output
-    
+
     def generate_square_subsequent_mask(self, sz):
         return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
 
@@ -493,22 +514,25 @@ class PianoTranscriber(nn.Module):
 # ### Prep
 
 # %%
-h5_path = 'dataset.h5'
-model_name = 'model'
-MAX_LEN = 100
-tokenizer = Tokenizer()
+h5_path = 'dataset_big.h5'
+model_name = 'model_big'
+MAX_LEN = 400
+tokenizer = Tokenizer(time_count=260)
 
 # %%
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Resize((128, 64)),
+    transforms.Resize((256, 128)),
     transforms.Normalize((0.5,), (0.5,))
 ])
 
 # %%
 path_loader = DatasetPathLoader(h5_path, MAX_LEN)
+
+
+# %%
 data = path_loader.data
-data = random.sample(path_loader.data, 1000)
+# data = random.sample(path_loader.data, 8000)
 print(f"Total data: {len(data)}")
 train_data, val_data = train_test_split(data, test_size=0.1)
 val_data, test_data = train_test_split(val_data, test_size=0.1)
@@ -527,37 +551,45 @@ val_loader = DataLoader(val_dataset, batch_size=32, num_workers=4, shuffle=False
 model = PianoTranscriber(
     input_size = 256, 
     vocab_size = len(tokenizer.id_to_token),
-    d_model_en = 128, 
+    d_model = 128, 
     nhead_en = 1, 
     num_layers_en = 1, 
-    d_model_de = 128, 
     nhead_de = 1, 
     num_layers_de = 1
 ).to(device)
 
 # weights = torch.ones(len(tokenizer.id_to_token)).to(device)
 # for note_id in tokenizer.val_to_note_id.values():
-#     weights[note_id] = 2
+#     weights[note_id] = 16
+# criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>'], weight=weights).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id['<pad>']).to(device)
+
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 history = TrainingHistory()
-early_stopping = EarlyStopping(patience=5, path=f'{model_name}_{time.strftime("%Y%m%d-%H%M%S")}.pt')
+early_stopping = EarlyStopping(patience=10, path=f'{model_name}_{time.strftime("%Y%m%d-%H%M%S")}.pt')
 
 # %%
-train(model, train_loader, val_loader, criterion, optimizer, epochs=10, device=device, history=history, early_stopping=early_stopping)
+train(model, train_loader, val_loader, criterion, optimizer, epochs=50, device=device, history=history, early_stopping=early_stopping)
 
 # %% [markdown]
 # # Tests
 
 # %%
-def get_param_acc(outputs):
-    res = np.zeros((len(outputs), 3))
+def get_param_stats(outputs):
+    acc = np.zeros((len(outputs), 3))
+    mean = np.zeros((len(outputs), 3))
+    std = np.zeros((len(outputs), 3))
     for i, el in enumerate(outputs):
         el = np.array(el)
         el = el[:, :-1]
         el = el.reshape(2, -1, 3)
-        res[i] = (el[0] == el[1]).sum(axis=0) / len(el[0])
-    return res.sum(axis=0) / len(outputs)
+        acc[i] = (el[0] == el[1]).mean(axis=0)
+        mean[i] = np.abs(el[0] - el[1]).mean(axis=0)
+        std[i] = np.sqrt(((el[0] - el[1]) ** 2).mean(axis=0))
+    acc = np.mean(acc, axis=0)
+    mean = np.mean(mean, axis=0)
+    std = np.mean(std, axis=0)
+    return {'acc': acc.round(3).tolist(), 'mean': mean.round(3).tolist(), 'std': std.round(3).tolist()}
 
 # %%
 test_dataset = H5Dataset(h5_path, test_data, tokenizer, transform)
@@ -568,8 +600,11 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 val_with_outs = ValidatorWithOutputs(model, criterion, device)
 outputs = val_with_outs.validate(test_loader)
+param_stats = get_param_stats(outputs)
 
-print(get_param_acc(outputs))
+for i in param_stats:
+    print(i, param_stats[i])
+
 for i, (predicted, expected) in enumerate(outputs):
     if i > 4:
         break
@@ -588,8 +623,8 @@ for i, (image, midi) in enumerate(train_loader):
     notes = tokenizer.id_list_to_tuple_list(midi[0][1:last].cpu().tolist())
     notes = np.array(notes)
     print(notes[:, 1])
-    plt.figure(figsize=(8, 8))
-    plt.imshow(image[0].cpu().squeeze(), cmap='gray', aspect=1/4, interpolation='nearest')
+    plt.figure(figsize=(16, 16))
+    plt.imshow(image[0].cpu().squeeze(), cmap='gray', aspect=1/2, interpolation='nearest')
     plt.axis('off')
     plt.show()
 
